@@ -28,6 +28,11 @@ def muat(t, p):
     return a.ambil_data(t, p)
 
 
+@st.cache_data(ttl=3600, show_spinner="Mengambil data fundamental...")
+def muat_fundamental(t):
+    return a.ambil_fundamental(t)
+
+
 if not ticker:
     st.info("Masukkan ticker di sidebar.")
     st.stop()
@@ -48,6 +53,15 @@ resisten = level[level["level"] > harga].sort_values("level").head(a.JUMLAH_LEVE
 pivot = a.pivot_klasik(df)
 tren = a.analisis_tren(df)
 ind = a.analisis_indikator(d)
+fund_data = muat_fundamental(ticker)
+fund = a.analisis_fundamental(fund_data)
+
+# ---- Identitas saham yang sedang dianalisis ----
+nama = fund_data.get("nama") or ticker
+st.header(f"{ticker} — {nama}")
+info_tambahan = " • ".join(x for x in (fund_data.get("sektor"), fund_data.get("industri")) if x)
+if info_tambahan:
+    st.caption(info_tambahan)
 
 c1, c2, c3, c4 = st.columns(4)
 c1.metric(f"Penutupan {df['date'].iloc[-1].date()}", f"{harga:,.2f}")
@@ -60,6 +74,16 @@ if len(support) and len(resisten):
     c4.metric("Support / Resisten terdekat", f"{s:,.2f} / {r:,.2f}", f"R:R {rr:.2f} | SL {sl:,.2f}", delta_color="off")
 else:
     c4.metric("Support / Resisten terdekat", "-", "level valid belum ada", delta_color="off")
+
+# ---- Ringkasan fundamental ----
+mu = fund_data.get("mata_uang")
+f1, f2, f3, f4, f5 = st.columns(5)
+f1.metric("Market Cap", a.format_market_cap(fund_data.get("market_cap"), mu))
+f2.metric("PER", f"{fund_data['per']:.2f}x" if a._angka(fund_data.get("per")) else "-")
+f3.metric("PBV", f"{fund_data['pbv']:.2f}x" if a._angka(fund_data.get("pbv")) else "-")
+f4.metric("ROE", f"{fund_data['roe']:.2%}" if a._angka(fund_data.get("roe")) else "-")
+f5.metric("Fundamental", fund["label"].replace("FUNDAMENTAL ", "").title(),
+          f"skor {fund['skor']:+d}/{fund['maks']}", delta_color="off")
 
 # ---- Grafik ----
 ada_vol = "volume" in d.columns and d["volume"].fillna(0).sum() > 0
@@ -91,7 +115,7 @@ fig.update_layout(height=900, xaxis_rangeslider_visible=False, legend=dict(orien
 st.plotly_chart(fig, use_container_width=True)
 
 # ---- Tabel ----
-t1, t2, t3, t4 = st.tabs(["Support & Resisten", "Tren", "Indikator", "Pivot Point"])
+t1, t2, t3, t4, t5 = st.tabs(["Support & Resisten", "Tren", "Indikator", "Pivot Point", "Fundamental"])
 with t1:
     k1, k2 = st.columns(2)
     k1.subheader("Support (area pertimbangan beli)")
@@ -106,6 +130,11 @@ with t3:
     st.dataframe(ind["rincian"], hide_index=True, use_container_width=True)
 with t4:
     st.dataframe(pd.DataFrame(pivot.items(), columns=["Level", "Harga"]).round(2), hide_index=True)
+with t5:
+    st.subheader(fund["label"])
+    st.dataframe(fund["rincian"], hide_index=True, use_container_width=True)
+    st.caption("Ambang: PER < 15x murah, > 25x mahal | PBV < 1x murah, > 3x mahal | ROE >= 15% bagus, < 8% lemah. "
+               "Sesuaikan dengan sektor (mis. bank wajar ber-PBV tinggi). Data dari Yahoo Finance dan bisa tidak lengkap.")
 
 # ---- Unduh Excel ----
 buf = io.BytesIO()
@@ -114,6 +143,7 @@ with pd.ExcelWriter(buf, engine="openpyxl") as w:
     resisten.to_excel(w, sheet_name="Resisten", index=False)
     tren["rincian"].assign(kesimpulan=tren["label"]).to_excel(w, sheet_name="Tren", index=False)
     ind["rincian"].assign(kesimpulan=ind["label"]).to_excel(w, sheet_name="Indikator", index=False)
+    fund["rincian"].assign(kesimpulan=fund["label"]).to_excel(w, sheet_name="Fundamental", index=False)
     d.to_excel(w, sheet_name="Data Harian", index=False)
 st.download_button("⬇️ Unduh hasil (Excel)", buf.getvalue(),
                    file_name=f"analisis_{ticker.replace('.', '_')}.xlsx",

@@ -22,6 +22,10 @@ BB_PERIODE = 20           # periode Bollinger Band
 BB_STD = 2                # lebar band = 2 standar deviasi
 VOL_PERIODE = 20          # rata-rata volume 20 hari
 VOL_LONJAKAN = 1.5        # volume >= 1,5x rata-rata dianggap besar
+PER_MURAH, PER_MAHAL = 15, 25      # PER < 15 murah, > 25 mahal
+PBV_MURAH, PBV_MAHAL = 1.0, 3.0    # PBV < 1 murah, > 3 mahal
+ROE_BAGUS, ROE_LEMAH = 0.15, 0.08  # ROE >= 15% bagus, < 8% lemah
+CAP_BESAR, CAP_MENENGAH = 50e12, 10e12   # market cap (Rp): >= 50T besar, >= 10T menengah
 # ========================
 
 
@@ -237,3 +241,107 @@ def analisis_indikator(d):
     return {"label": label, "skor": total, "maks": maks, "rincian": pd.DataFrame(rincian)}
 
 
+
+
+def ambil_fundamental(ticker):
+    """Ambil nama perusahaan & data fundamental (PER, market cap, PBV, ROE) dari Yahoo Finance.
+    Jika gagal / data tidak ada, kembalikan dict kosong agar app tetap jalan."""
+    try:
+        info = yf.Ticker(ticker).info or {}
+    except Exception:
+        return {}
+    return {
+        "nama": info.get("longName") or info.get("shortName") or ticker,
+        "sektor": info.get("sector"),
+        "industri": info.get("industry"),
+        "mata_uang": info.get("currency"),
+        "market_cap": info.get("marketCap"),
+        "per": info.get("trailingPE"),
+        "pbv": info.get("priceToBook"),
+        "roe": info.get("returnOnEquity"),   # pecahan: 0.20 = 20%
+    }
+
+
+def _angka(v):
+    """True jika v angka valid (bukan None/NaN)."""
+    return v is not None and isinstance(v, (int, float, np.number)) and np.isfinite(v)
+
+
+def format_market_cap(nilai, mata_uang=None):
+    """Format market cap agar mudah dibaca (T = triliun, M = miliar)."""
+    if not _angka(nilai):
+        return "-"
+    awal = "Rp " if mata_uang == "IDR" else (f"{mata_uang} " if mata_uang else "")
+    for batas, sat in ((1e12, "T"), (1e9, "M"), (1e6, "Jt")):
+        if abs(nilai) >= batas:
+            return f"{awal}{nilai / batas:,.2f} {sat}"
+    return f"{awal}{nilai:,.0f}"
+
+
+def analisis_fundamental(f):
+    """Beri skor +1 (bagus) / 0 / -1 (kurang) untuk PER, PBV, ROE; market cap hanya klasifikasi ukuran."""
+    rincian = []
+
+    def tambah(nama, nilai, skor, ket):
+        rincian.append({"indikator": nama, "nilai": nilai, "skor": skor, "keterangan": ket})
+
+    per = f.get("per")
+    if _angka(per):
+        if per <= 0:
+            tambah("PER", f"{per:.2f}", -1, "perusahaan rugi (EPS negatif)")
+        elif per < PER_MURAH:
+            tambah("PER", f"{per:.2f}x", 1, f"murah (< {PER_MURAH}x)")
+        elif per <= PER_MAHAL:
+            tambah("PER", f"{per:.2f}x", 0, f"wajar ({PER_MURAH}-{PER_MAHAL}x)")
+        else:
+            tambah("PER", f"{per:.2f}x", -1, f"mahal (> {PER_MAHAL}x)")
+    else:
+        tambah("PER", "-", 0, "data tidak tersedia")
+
+    pbv = f.get("pbv")
+    if _angka(pbv):
+        if pbv < PBV_MURAH:
+            tambah("PBV", f"{pbv:.2f}x", 1, f"di bawah nilai buku (< {PBV_MURAH}x)")
+        elif pbv <= PBV_MAHAL:
+            tambah("PBV", f"{pbv:.2f}x", 0, f"wajar ({PBV_MURAH}-{PBV_MAHAL}x)")
+        else:
+            tambah("PBV", f"{pbv:.2f}x", -1, f"premium tinggi (> {PBV_MAHAL}x)")
+    else:
+        tambah("PBV", "-", 0, "data tidak tersedia")
+
+    roe = f.get("roe")
+    if _angka(roe):
+        if roe >= ROE_BAGUS:
+            tambah("ROE", f"{roe:.2%}", 1, f"profitabilitas bagus (>= {ROE_BAGUS:.0%})")
+        elif roe >= ROE_LEMAH:
+            tambah("ROE", f"{roe:.2%}", 0, f"cukup ({ROE_LEMAH:.0%}-{ROE_BAGUS:.0%})")
+        else:
+            tambah("ROE", f"{roe:.2%}", -1, f"lemah (< {ROE_LEMAH:.0%})")
+    else:
+        tambah("ROE", "-", 0, "data tidak tersedia")
+
+    cap = f.get("market_cap")
+    mu = f.get("mata_uang")
+    if _angka(cap):
+        if mu == "IDR":
+            ukuran = ("kapitalisasi besar (large cap)" if cap >= CAP_BESAR
+                      else "kapitalisasi menengah (mid cap)" if cap >= CAP_MENENGAH
+                      else "kapitalisasi kecil (small cap)")
+        else:
+            ukuran = "klasifikasi hanya untuk saham dalam Rupiah"
+        tambah("Market Cap", format_market_cap(cap, mu), 0, ukuran)
+    else:
+        tambah("Market Cap", "-", 0, "data tidak tersedia")
+
+    nilai = [r for r in rincian if r["indikator"] != "Market Cap" and r["nilai"] != "-"]
+    total, maks = sum(r["skor"] for r in nilai), len(nilai)
+    rasio = total / maks if maks else 0
+    if not maks:
+        label = "DATA FUNDAMENTAL TIDAK TERSEDIA"
+    elif rasio >= 0.4:
+        label = "FUNDAMENTAL BAIK"
+    elif rasio <= -0.4:
+        label = "FUNDAMENTAL LEMAH"
+    else:
+        label = "FUNDAMENTAL NETRAL"
+    return {"label": label, "skor": total, "maks": maks, "rincian": pd.DataFrame(rincian)}
